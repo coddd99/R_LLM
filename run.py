@@ -1,36 +1,34 @@
 
 import os
-from transformers import AutoTokenizer
+import random
+import argparse
+import ast
+import pickle
+from collections import defaultdict
+import datetime
 
 import numpy as np
-from tqdm import tqdm
-from collections import defaultdict
-from utils.loader_kgat import *
-from utils.metrics3 import *
-from box import Box
-import pickle
-import deepspeed
-import random
-from transformers import BertModel, BertTokenizer
 import torch
+import torch.nn.functional as F
+import torch.optim as optim
 from torch.optim import Adam
 from torch.utils.data import TensorDataset, DataLoader
-import torch.nn.functional as F
-import random
-from datasets import Dataset
-from utils.model_helper import *
-import torch.optim as optim
-
-import argparse
-
+from tqdm import tqdm
+from box import Box
+import deepspeed
 from deepspeed.runtime.lr_schedules import WarmupLR
+from transformers import AutoTokenizer, BertModel, BertTokenizer
+from datasets import Dataset
+
+from utils.loader_recsysllm import *
+from utils.metrics3 import *
+from utils.model_helper import *
 from model import BertKG
+
 
 random.seed(42)
 np.random.seed(42)
 torch.manual_seed(42)
-
-# GPU 사용 시 기본 시드만 설정
 if torch.cuda.is_available():
     torch.cuda.manual_seed(42)
     
@@ -61,7 +59,7 @@ def sample_pos_triples_for_h(kg_dict, head, n_sample_pos_triples=1):
     return sample_relations, sample_pos_tails
 
 
-def sample_neg_triples_for_h(kg_dict, head, relation, n_sample_neg_triples):
+def sample_neg_triples_for_h(kg_dict, kg_rt, head, relation, n_sample_neg_triples):
     pos_triples = kg_dict[head]
     neg_tail_candidate = list(set(kg_rt[relation])-{item[1] for item in kg_dict[head]})
     
@@ -77,7 +75,7 @@ def sample_neg_triples_for_h(kg_dict, head, relation, n_sample_neg_triples):
     return sample_neg_tails
 
 
-def generate_kg_batch(kg_dict, batch_size, mode):
+def generate_kg_batch(kg_dict, kg_rt, batch_size, mode):
     """
     return : pos relation id, neg realation id, atten mask
     """
@@ -93,7 +91,7 @@ def generate_kg_batch(kg_dict, batch_size, mode):
         batch_relation += relation
         batch_pos_tail += pos_tail
 
-        neg_tail = sample_neg_triples_for_h(kg_dict, h, relation[0], 1)
+        neg_tail = sample_neg_triples_for_h(kg_dict, kg_rt, h, relation[0], 1)
         batch_neg_tail += neg_tail
 
     pos_relation = []
@@ -185,16 +183,48 @@ def evaluate(model, dataloader, Ks, device):
 
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="Training Configuration")
+
+    parser.add_argument('--data_name', type=str, default='LastFM')
+    parser.add_argument('--data_dir', type=str, default='./data/')
+    parser.add_argument('--use_pretrain', type=int, default=0)
+    #parser.add_argument('--pretrain_embedding_dir', type=str, default='datasets/pretrain/')
+    #parser.add_argument('--pretrain_model_path', type=str, default='trained_model/model.pth')
+    parser.add_argument('--cf_batch_size', type=int, default=2048)
+    parser.add_argument('--kg_batch_size', type=int, default=1024)
+    parser.add_argument('--test_batch_size', type=int, default=8912)
+    #parser.add_argument('--embed_dim', type=int, default=64)
+    #parser.add_argument('--relation_dim', type=int, default=64)
+    parser.add_argument('--laplacian_type', type=str, default='symmetric')
+    parser.add_argument('--aggregation_type', type=str, default='gcn')
+    parser.add_argument('--conv_dim_list', type=str, default='[128, 128, 64]')
+    parser.add_argument('--mess_dropout', type=str, default='[0.1, 0.1, 0.1]')
+    parser.add_argument('--kg_l2loss_lambda', type=float, default=1e-5)
+    parser.add_argument('--cf_l2loss_lambda', type=float, default=1e-5)
+    parser.add_argument('--lr', type=float, default=0.0001)
+    parser.add_argument('--n_epoch', type=int, default=10)
+    parser.add_argument('--stopping_steps', type=int, default=20)
+    parser.add_argument('--cf_print_every', type=int, default=10)
+    parser.add_argument('--dropout', type=float, default=0.01)
+    parser.add_argument('--evaluate_every', type=int, default=5)
+    parser.add_argument('--Ks', type=str, default='[10, 20]')
+    parser.add_argument('--save_dir', type=str, default='../models/kgbert_model_ngcf2')
+
+    return parser.parse_args()
 
 
 
-def train(model, kgbert_optimizer, cf_optimizer, config):
+
+def train(model, kgbert_optimizer, cf_optimizer, config, **kwargs):
+    kg_dict = kwargs.get('kg_dict')
+    kg_rt = kwargs.get('kg_rt')
     kg_num_batches = config.kg_batch_size  
     cf_num_batches = config.cf_batch_size  
     loss_storage = {}
     model.train()
     
-    Ks = config.Ks
+    Ks = ast.literal_eval(config.Ks)
     metrics_list = {k: {'precision': [], 'ndcg': [], 'serendipity': [], 'serendipity_2': []} for k in Ks}
 
     ds_config_kg = {
@@ -213,13 +243,13 @@ def train(model, kgbert_optimizer, cf_optimizer, config):
     )
 
     kg_scheduler = WarmupLR(kgbert_optimizer, warmup_min_lr=1e-5, warmup_max_lr=1e-3, warmup_num_steps=1000)
-    """
+    
     for epoch in range(1):
         print(f'\nKG-BERT training..... Epoch {epoch+1}')
         kgbert_total_loss = 0.0
         num_batches = len(knowledge) // kg_num_batches
         for i in tqdm(range(num_batches)):
-            pos_id, neg_id, pos_att, neg_att = generate_kg_batch(kg_dict, batch_size=kg_num_batches, mode='train_kgbert_v2')
+            pos_id, neg_id, pos_att, neg_att = generate_kg_batch(kg_dict, kg_rt, batch_size=kg_num_batches, mode='train_kgbert_v2')
             loss = model(pos_id, neg_id, pos_att, neg_att, mode='train_kgbert_v2')
             model.backward(loss)
             model.step()
@@ -228,14 +258,14 @@ def train(model, kgbert_optimizer, cf_optimizer, config):
         avg_loss = kgbert_total_loss / num_batches
         print(f"Epoch {epoch+1}, KG-BERT Loss: {avg_loss:.4f}")
         kg_scheduler.step()
-    """
+    
 
     with torch.no_grad():
         print('Updating item embeddings...')
         model.module.update_item_emb()
         print('Updating user embeddings...')
         model.module.update_user_emb()
-    
+
 
     ds_config_cf = {
             "train_batch_size": cf_num_batches,
@@ -295,46 +325,13 @@ def train(model, kgbert_optimizer, cf_optimizer, config):
         'model_state_dict': model.module.state_dict(),  
         'optimizer_state_dict': cf_optimizer.state_dict(),
     }
-
+    
+    os.makedirs(config.save_dir, exist_ok=True)
     save_path = os.path.join(config.save_dir, 'trained_model.pth')
     torch.save(save_result, save_path)
     print(f"Model and training results saved at {save_path}")
 
     return save_result
-
-
-
-
-def parse_args():
-    parser = argparse.ArgumentParser(description="Training Configuration")
-
-    parser.add_argument('--data_name', type=str, default='LastFM')
-    parser.add_argument('--data_dir', type=str, default='./data/')
-    parser.add_argument('--use_pretrain', type=int, default=0)
-    #parser.add_argument('--pretrain_embedding_dir', type=str, default='datasets/pretrain/')
-    #parser.add_argument('--pretrain_model_path', type=str, default='trained_model/model.pth')
-    parser.add_argument('--cf_batch_size', type=int, default=2048)
-    parser.add_argument('--kg_batch_size', type=int, default=1024)
-    parser.add_argument('--test_batch_size', type=int, default=8912)
-    #parser.add_argument('--embed_dim', type=int, default=64)
-    #parser.add_argument('--relation_dim', type=int, default=64)
-    parser.add_argument('--laplacian_type', type=str, default='symmetric')
-    parser.add_argument('--aggregation_type', type=str, default='gcn')
-    parser.add_argument('--conv_dim_list', type=str, default='[128, 128, 64]')
-    parser.add_argument('--mess_dropout', type=str, default='[0.1, 0.1, 0.1]')
-    parser.add_argument('--kg_l2loss_lambda', type=float, default=1e-5)
-    parser.add_argument('--cf_l2loss_lambda', type=float, default=1e-5)
-    parser.add_argument('--lr', type=float, default=0.0001)
-    parser.add_argument('--n_epoch', type=int, default=10)
-    parser.add_argument('--stopping_steps', type=int, default=20)
-    parser.add_argument('--cf_print_every', type=int, default=10)
-    parser.add_argument('--dropout', type=float, default=0.01)
-    parser.add_argument('--evaluate_every', type=int, default=5)
-    parser.add_argument('--Ks', type=str, default='[10, 20]')
-    parser.add_argument('--save_dir', type=str, default='../models/kgbert_model_ngcf2')
-
-    return parser.parse_args()
-
 
 
 if __name__ == '__main__':
@@ -360,17 +357,24 @@ if __name__ == '__main__':
         if t not in kg_rt[r]:
             kg_rt[r].append(t)
     
-  
-        
-    data = DataLoaderKGAT(config)
+    
+    data = DataLoaderRecsysLLM(config)
     tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
     
 
     lr, dropout = config.lr, config.dropout
-    model = BertKG(data.n_users, data.n_items, data.A_in, "bert-base-uncased", tokenizer, kg_dict, item_dict, data, config)
+    model = BertKG(data.n_users, data.n_items, data.A_in, "bert-base-uncased", tokenizer, kg_dict, kg_rt, item_dict, data, config)
     model.to(dtype=torch.bfloat16, device=device)
     loss_ = torch.nn.CrossEntropyLoss()
     cf_optimizer = optim.AdamW(model.parameters(), lr = lr)
     kg_optimizer = optim.AdamW(model.parameters(), lr = 5e-5)
+    
 
-    result = train(model = model, kgbert_optimizer=kg_optimizer, cf_optimizer = cf_optimizer, config=config)
+    result = train(model = model, kgbert_optimizer=kg_optimizer, cf_optimizer = cf_optimizer, config=config, kg_dict=kg_dict, kg_rt=kg_rt)
+    timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+    file_name = f'result_data_{timestamp}.pkl'
+    save_path = os.path.join(config.save_dir, file_name)
+
+
+    with open(save_path, 'wb') as f:
+        pickle.dump(result, f)
