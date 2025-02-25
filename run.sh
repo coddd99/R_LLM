@@ -26,7 +26,7 @@ python3 run.py \
   --dropout 0.01 \
   --evaluate_every 5 \
   --Ks "[10, 20]" \
-  --save_dir "../models/kgbert_model_ngcf2" \
+  --save_dir "./models/kgbert_model_ngcf2" \
   > "$log_file" 2>&1
 
 echo "Training complete. Logs saved to $log_file"
