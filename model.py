@@ -1,25 +1,27 @@
 import os
-from transformers import AutoTokenizer
 import json
-import numpy as np
-from tqdm import tqdm
-from pathlib import Path
-from collections import defaultdict
-import re
-import utils.loader_base
-from utils.loader_kgat import *
-from box import Box
-import pickle
 import ast
-from transformers import BertModel, BertTokenizer
+import pickle
+import re
+from collections import defaultdict
+from pathlib import Path
+
+import numpy as np
 import torch
+import torch.nn.functional as F
+import torch.nn.init
 from torch import nn
 from torch.optim import Adam
 from torch.utils.data import TensorDataset, DataLoader
+from tqdm import tqdm
+from box import Box
 from datasets import Dataset
-import torch.nn.functional as F
-import torch.nn.init 
+from transformers import AutoTokenizer, BertModel, BertTokenizer
+
+import utils.loader_base
+from utils.loader_kgat import *
 from utils.model_helper import *
+
 
 def _L2_loss_mean(x):
     return torch.mean(torch.sum(torch.pow(x, 2), dim=1, keepdim=False) / 2.)
@@ -91,7 +93,7 @@ class Aggregator(nn.Module):
 
 
 class BertKG(nn.Module):
-    def __init__(self, n_users, n_items, graph, model_name, tokenizer, kg_dict, item_dict, data, config):
+    def __init__(self, n_users, n_items, graph, model_name, tokenizer, kg_dict, kg_rt, item_dict, data, config):
         super(BertKG, self).__init__()
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.tokenizer = tokenizer
@@ -102,7 +104,7 @@ class BertKG(nn.Module):
         self.user_embed_dim = self.item_embed_dim
         self.cls_mlp = nn.Linear(self.bert.config.hidden_size, 2)
         self.data = data
-
+        self.rel = list(kg_rt.keys())[0]
         nn.init.xavier_uniform_(self.cls_mlp.weight)
         self.cf_l2loss_lambda = 0.1
         self.n_items = n_items
@@ -281,7 +283,7 @@ class BertKG(nn.Module):
                     continue
 
                 for knowledge_triple in self.kg_dict[item_key]:
-                    if knowledge_triple[0] == "has the genre":  # 데이터셋마다 변경 필요
+                    if knowledge_triple[0] == self.rel:
                         genre = knowledge_triple[1]
 
                         # 해당 genre가 5개를 넘으면 추가하지 않음
@@ -298,11 +300,9 @@ class BertKG(nn.Module):
         unique_sentences = list(sentence_freq.keys())
         sentence_to_index = {s: idx for idx, s in enumerate(unique_sentences)}
 
-        # 고유 문장만 BERT 처리
         dataset = Dataset.from_dict({'text': unique_sentences})
         tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased", use_fast=True)
 
-        # 올바른 배치 처리
         tokenized_dataset = dataset.map(
             lambda x: tokenizer(x['text'], truncation=True, padding='max_length', max_length=64),
             batched=True,
@@ -312,15 +312,11 @@ class BertKG(nn.Module):
 
         tokenized_dataset.set_format(type="torch", columns=["input_ids", "attention_mask"])
 
-        # 배치 처리 설정
-        batch_size = 8192 * 2  # 배치 크기 조정
+ 
+        batch_size = 8192 * 2  
         num_batches = len(tokenized_dataset) // batch_size + int(len(tokenized_dataset) % batch_size > 0)
-
-    
-        # 빈 텐서 생성 (dtype을 bfloat16으로 설정)
         embeddings = torch.zeros((len(tokenized_dataset), self.bert.config.hidden_size), dtype=torch.bfloat16).to(self.device)
 
-        # 배치 단위로 처리
         with torch.no_grad():
             for i in range(num_batches):
                 print(f'{i+1}/{num_batches}번째 배치의 텍스트 임베딩 업데이트 중...')
@@ -334,15 +330,14 @@ class BertKG(nn.Module):
                     batch_embeddings = self.bert(input_ids, attention_mask=attention_mask).last_hidden_state[:, 0, :]
                     embeddings[start:end] = batch_embeddings
 
-                # 사용이 끝난 변수 삭제 및 캐시 메모리 해제
+
                 del input_ids, attention_mask, batch_embeddings
                 torch.cuda.empty_cache()
 
-        # 사용이 끝난 변수 삭제 및 캐시 메모리 해제
+ 
         del tokenized_dataset, dataset, tokenizer
         torch.cuda.empty_cache()
 
-        # 사용자별 가중 평균 계산을 위한 데이터 수집
         all_indices = []
         all_weights = []
         all_user_ids = []
@@ -354,21 +349,18 @@ class BertKG(nn.Module):
             all_weights.extend(weights)
             all_user_ids.extend([user_id] * len(sentences))
 
-        # 필요 없는 변수 삭제
         del sentence_freq, user_sentence_map, sentence_to_index, unique_sentences
         torch.cuda.empty_cache()
 
-        # 전체 데이터 크기 확인
+
         total_data = len(all_indices)
 
-        # 배치 크기 설정 (적절한 크기로 조정)
-        batch_size = 1000000  # 필요에 따라 조정
 
-        # 빈 텐서 생성 (dtype을 bfloat16으로 설정)
+        batch_size = 1000000 
+
         user_embeddings = torch.zeros((self.n_users, embeddings.size(1)), dtype=torch.bfloat16).to(self.device)
         weights_sum = torch.zeros(self.n_users, dtype=torch.bfloat16).to(self.device)
 
-        # 배치 단위로 처리
         num_batches = total_data // batch_size + int(total_data % batch_size > 0)
         for i in range(num_batches):
             print(f'{i+1}/{num_batches} 배치 처리 중...')
@@ -386,18 +378,15 @@ class BertKG(nn.Module):
             user_embeddings.index_add_(0, user_ids_tensor, weighted_embeddings)
             weights_sum.index_add_(0, user_ids_tensor, weights_tensor)
 
-            # 사용이 끝난 변수 삭제 및 캐시 메모리 해제
             del indices_tensor, weights_tensor, user_ids_tensor, user_specific_embeddings, weighted_embeddings
             torch.cuda.empty_cache()
 
-        # embeddings 텐서 삭제 및 캐시 메모리 해제
+
         del embeddings
         torch.cuda.empty_cache()
 
-        # 가중 평균 계산
         user_embeddings = user_embeddings / weights_sum.unsqueeze(1)
 
-        # 필요 없는 변수 삭제 및 캐시 메모리 해제
         del weights_sum, all_indices, all_weights, all_user_ids
         torch.cuda.empty_cache()
 
@@ -406,10 +395,7 @@ class BertKG(nn.Module):
     def update_item_emb(self, batch_size=8192*2):
         self.bert.eval()
         self.bert.to(torch.bfloat16)
-
-        # 아이템 ID와 아이템 이름 매핑 딕셔너리
-        # self.itemid_dict: {head (str): item_id (int)}
-        itemid_dict = self.item_dict  # 이미 로드된 itemid_dict 사용(str : tensor id)
+        itemid_dict = self.item_dict 
 
         item_pos_ids = list(itemid_dict.values())  # 아이템 ID 목록 (정수형)
         item_heads = list(itemid_dict.keys())      # head 목록 (문자열)
@@ -426,7 +412,6 @@ class BertKG(nn.Module):
 
         with tqdm(total=(len(kg_data) + batch_size - 1) // batch_size, desc='Processing batches') as pbar:
             for batch_kg_data in helper_generate_batches(kg_data, batch_size):
-                # 토큰화
                 relation = self.tokenizer(
                     batch_kg_data, truncation=True, padding='max_length', max_length=64
                 )
@@ -487,9 +472,8 @@ class BertKG(nn.Module):
  
     def apply_self_attention(self, user_embedding):
         if user_embedding.dim() == 1:
-            user_embedding = user_embedding.unsqueeze(0)  # (1, embed_dim)으로 변환
+            user_embedding = user_embedding.unsqueeze(0)  # (1, embed_dim)
 
-        # Linear projections
         Q = self.s_query_proj(user_embedding)  # (batch_size, embed_dim)
         K = self.s_key_proj(user_embedding)    # (batch_size, embed_dim)
         V = self.s_value_proj(user_embedding)  # (batch_size, embed_dim)
@@ -502,7 +486,7 @@ class BertKG(nn.Module):
 
         attn_output = torch.matmul(attn_weights, V)  # (batch_size, embed_dim)
 
-        # 최종 출력: 배치 크기가 1인 경우 차원을 없애서 (embed_dim,)
+
         output = self.s_out_proj(F.leaky_relu(attn_output))  # (batch_size, embed_dim)
 
         if output.size(0) == 1:
@@ -532,7 +516,7 @@ class BertKG(nn.Module):
         attn_output = torch.matmul(attn_weights, V)  # (num_items, embed_dim)
         output = self.out_proj(F.leaky_relu(attn_output))  # (num_items, 256)
 
-        if item_text_emb.size(0) == 1:  # num_items == 1인 경우
+        if item_text_emb.size(0) == 1:  # num_items == 1
             output = output.squeeze(0)  # (256,)
         # num_items > 1인 경우 그대로 유지
         output = output.squeeze(1)
@@ -543,7 +527,6 @@ class BertKG(nn.Module):
         if mode == 'train_kgbert_v2':
             return self.train_kgbert_v2(*input)
         if mode == 'train_cf':
-            #self.update_item_emb()
             return self.train_cf(*input)
         if mode == 'predict':
             return self.calc_score(*input)
