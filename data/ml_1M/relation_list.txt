@@ -1,3 +1,0 @@
-org_id remap_id
-year 0
-genre 1
