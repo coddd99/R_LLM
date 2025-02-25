@@ -47,37 +47,6 @@ class DataLoaderBase(object):
         item = np.array(item, dtype=np.int32)
         return (user, item), user_dict
 
-    """
-    def load_cf(self, filename):
-        user = []
-        item = []
-        rating = []
-        user_dict = dict()
-        with open(filename, 'r', encoding='utf-8-sig') as file:
-            lines = file.readlines()
-        #lines = open(filename, 'r').readlines()
-        for l in lines:
-            tmp = l.strip()
-            inter = re.findall(r'\[.*?\]', tmp)  # [아이템번호, 점수]를 찾기 위해 정규 표현식 사용
-            user_id = int(tmp.split()[0])  # 첫 번째 값은 user_id
-
-            item_ids = []
-            for item_rating in inter:
-                # [아이템번호, 점수]에서 아이템번호와 점수 추출
-                item_id, score = map(int, item_rating.strip('[]').split(','))
-                user.append(user_id)
-                item.append(item_id)
-                rating.append(score)
-                item_ids.append(item_id)
-            
-            user_dict[user_id] = item_ids
-
-        user = np.array(user, dtype=np.int32)
-        item = np.array(item, dtype=np.int32)
-        rating = np.array(rating, dtype=np.float32)
-        #return (user, item, rating), user_dict
-        return (user, item) , user_dict
-    """
     def statistic_cf(self):
         self.n_users = max(max(self.cf_train_data[0]), max(self.cf_test_data[0])) + 1
         self.n_items = max(max(self.cf_train_data[1]), max(self.cf_test_data[1])) + 1
@@ -90,7 +59,7 @@ class DataLoaderBase(object):
         kg_data = kg_data.drop_duplicates()
         return kg_data
 
-    """
+    
 
     def sample_pos_items_for_u(self, user_dict, user_id, n_sample_pos_items):
         pos_items = user_dict[user_id]
@@ -138,61 +107,3 @@ class DataLoaderBase(object):
         batch_pos_item = torch.LongTensor(batch_pos_item)
         batch_neg_item = torch.LongTensor(batch_neg_item)
         return batch_user, batch_pos_item, batch_neg_item
-
-
-    def sample_pos_triples_for_h(self, kg_dict, head, n_sample_pos_triples):
-        pos_triples = kg_dict[head]
-        n_pos_triples = len(pos_triples)
-
-        sample_relations, sample_pos_tails = [], []
-        while True:
-            if len(sample_relations) == n_sample_pos_triples:
-                break
-
-            pos_triple_idx = np.random.randint(low=0, high=n_pos_triples, size=1)[0]
-            tail = pos_triples[pos_triple_idx][0]
-            relation = pos_triples[pos_triple_idx][1]
-
-            if relation not in sample_relations and tail not in sample_pos_tails:
-                sample_relations.append(relation)
-                sample_pos_tails.append(tail)
-        return sample_relations, sample_pos_tails
-
-
-    def sample_neg_triples_for_h(self, kg_dict, head, relation, n_sample_neg_triples, highest_neg_idx):
-        pos_triples = kg_dict[head]
-
-        sample_neg_tails = []
-        while True:
-            if len(sample_neg_tails) == n_sample_neg_triples:
-                break
-
-            tail = np.random.randint(low=0, high=highest_neg_idx, size=1)[0]
-            if (tail, relation) not in pos_triples and tail not in sample_neg_tails:
-                sample_neg_tails.append(tail)
-        return sample_neg_tails
-
-
-    def generate_kg_batch(self, kg_dict, batch_size, highest_neg_idx):
-        exist_heads = kg_dict.keys()
-        if batch_size <= len(exist_heads):
-            batch_head = random.sample(exist_heads, batch_size)
-        else:
-            batch_head = [random.choice(exist_heads) for _ in range(batch_size)]
-
-        batch_relation, batch_pos_tail, batch_neg_tail = [], [], []
-        for h in batch_head:
-            relation, pos_tail = self.sample_pos_triples_for_h(kg_dict, h, 1)
-            batch_relation += relation
-            batch_pos_tail += pos_tail
-
-            neg_tail = self.sample_neg_triples_for_h(kg_dict, h, relation[0], 1, highest_neg_idx)
-            batch_neg_tail += neg_tail
-
-        batch_head = torch.LongTensor(batch_head)
-        batch_relation = torch.LongTensor(batch_relation)
-        batch_pos_tail = torch.LongTensor(batch_pos_tail)
-        batch_neg_tail = torch.LongTensor(batch_neg_tail)
-        return batch_head, batch_relation, batch_pos_tail, batch_neg_tail
-    """
-

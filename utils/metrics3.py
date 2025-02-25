@@ -4,11 +4,9 @@ from sklearn.metrics import roc_auc_score, log_loss, mean_squared_error
 from collections import defaultdict
 
 def precision_at_k_batch(hits_k, k):
-    # GPU 상에서 연산을 수행하도록 PyTorch 연산 사용
     return torch.mean(hits_k.sum(dim=1) / k)
 
 def ndcg_at_k_batch(hits_k, k):
-    # GPU 상에서 NDCG 계산
     discount = torch.log2(torch.arange(2, k + 2, device=hits_k.device))
     dcg = (hits_k / discount).sum(dim=1)
     idcg = torch.tensor([(1.0 / torch.log2(torch.arange(2, len(row) + 2, device=hits_k.device))).sum() 
@@ -16,7 +14,6 @@ def ndcg_at_k_batch(hits_k, k):
     return torch.mean(dcg / idcg)
 
 def serendipity_at_k_batch(rank_indices, train_user_dict, test_user_dict, user_ids, k):
-    # Serendipity 계산이 GPU 상에서 수행되도록 작성
     serendipity = []
     for idx, u in enumerate(user_ids):
         recommended_items = rank_indices[idx, :k]
@@ -25,7 +22,6 @@ def serendipity_at_k_batch(rank_indices, train_user_dict, test_user_dict, user_i
         novelty_hits = torch.isin(recommended_items, test_items) & (~torch.isin(recommended_items, train_items))
         serendipity.append(novelty_hits.float().mean())
     return torch.tensor(serendipity, device=rank_indices.device).mean()
-
 
 
 
@@ -58,7 +54,7 @@ def serendipity_at_k_batch2(rank_indices, train_user_dict, test_user_dict, user_
         test_items = test_items_list[idx]
         rel_i[idx] = torch.isin(recommended_items_k[idx], test_items).to(torch.bfloat16)  # 추천된 아이템이 테스트 집합에 있는지 확인
     
-    # Serendipity 계산: p(i) * rel(i)
+
     serendipity_sum = torch.sum(p_i * rel_i, dim=1)  # Shape: (n_users,)
     
     # Serendipity@k 계산
@@ -68,7 +64,6 @@ def serendipity_at_k_batch2(rank_indices, train_user_dict, test_user_dict, user_
 
 
 def calc_metrics_at_k(cf_scores, train_user_dict, test_user_dict, user_ids, item_ids, Ks):
-    # 기존 작업과 동일
     for idx, u in enumerate(user_ids):
         train_pos_item_list = train_user_dict[int(u.item())]
         cf_scores[idx, train_pos_item_list] = -float('inf')
@@ -99,10 +94,10 @@ def calc_metrics_at_k(cf_scores, train_user_dict, test_user_dict, user_ids, item
 
 
 def calculate_group_metrics(train_user_dict, test_user_dict, user_ids_batches, item_ids, model, Ks):
-    # 유저별 인터랙션 수 계산
+
     user_interactions = {u: len(items) for u, items in train_user_dict.items()}
     interaction_counts = np.array(list(user_interactions.values()))
-    # 4분위로 나누기
+
     quantiles = np.percentile(interaction_counts, [25, 50, 75])
     print('quantiles : ')
     print(quantiles)
@@ -117,7 +112,7 @@ def calculate_group_metrics(train_user_dict, test_user_dict, user_ids_batches, i
         else:
             user_groups['Q4'].append(user_id)
 
-    # 각 그룹별 메트릭 계산
+
     all_metrics = {}
     for group, group_user_ids in user_groups.items():
         print(f"Processing group: {group}, Users: {len(group_user_ids)}")
@@ -132,12 +127,12 @@ def calculate_group_metrics(train_user_dict, test_user_dict, user_ids_batches, i
                 batch_scores = model(batch_user_ids, item_ids, mode='predict')
                 batch_metrics = calc_metrics_at_k(batch_scores, train_user_dict, test_user_dict, batch_user_ids, item_ids, Ks)
 
-                # 메트릭 저장
+               
                 for k in Ks:
                     for metric in ['precision', 'ndcg']:
                         group_metrics[k][metric].append(batch_metrics[k][metric].item())
 
-        # 그룹별 평균 메트릭 계산
+       
         for k in Ks:
             for metric in ['precision', 'ndcg']:
                 group_metrics[k][metric] = np.mean(group_metrics[k][metric])
