@@ -308,7 +308,7 @@ def train(model, kgbert_optimizer, cf_optimizer, config, **kwargs):
 def parse_args():
     parser = argparse.ArgumentParser(description="Training Configuration")
     parser.add_argument('--data_name', type=str, default='LastFM')
-    parser.add_argument('--data_dir', type=str, default='./data/')
+    parser.add_argument('--data_dir', type=str, default='./data')
     parser.add_argument('--use_pretrain', type=int, default=0)
 
     parser.add_argument('--cf_batch_size', type=int, default=2048)
@@ -327,7 +327,7 @@ def parse_args():
     parser.add_argument('--cf_print_every', type=int, default=10)
     parser.add_argument('--dropout', type=float, default=0.01)
     parser.add_argument('--evaluate_every', type=int, default=5)
-    parser.add_argument('--Ks', type=str, default='[10, 20]')
+    parser.add_argument('--Ks', type=str, default='[10, 15, 20]')
     parser.add_argument('--save_dir', type=str, default='./models')
 
     return parser.parse_args()
